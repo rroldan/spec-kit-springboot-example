@@ -79,7 +79,7 @@ This constitution supersedes informal practices and is the authoritative source 
 | Language           | Java                           | 21       | Primary development language                    |
 | Framework          | Spring Boot                    | 3.5      | Application framework                           |
 | Web               | Spring Web MVC                 | (BOM)    | REST API layer                                  |
-| **Security**       | **Spring Security + JWT**      | **(BOM / jjwt 0.12.6)** | **Authentication & role-based access control** |
+| **Security**       | **Spring Security**            | **(BOM)**               | **Authentication & role-based access control** |
 | **Database**       | **PostgreSQL**                 | **16**   | **Primary relational database (all environments)** |
 | ORM                | Spring Data JPA / Hibernate    | (BOM)    | Entity mapping and repository abstraction       |
 | Migrations         | Flyway                         | (BOM)    | Schema versioning — Hibernate DDL is disabled   |
@@ -95,7 +95,7 @@ This constitution supersedes informal practices and is the authoritative source 
 
 - **PostgreSQL only** — H2 and any other in-memory database are explicitly forbidden in every environment, including tests.
 - **Testcontainers** — all integration tests that touch the database spin up a real `postgres:16-alpine` container via the shared `PostgresTestContainer` `@TestConfiguration`. The `@ServiceConnection` annotation (Spring Boot 3.1+) wires the container into the `DataSource` automatically.
-- **Spring Security with JWT** — stateless sessions, two roles (`ROLE_USER` / `ROLE_ADMIN`), access enforced at both the `SecurityFilterChain` level and via `@PreAuthorize` on controllers. No HTTP Basic or form login is used.
+- **Spring Security with RBAC** — stateless or stateful sessions per feature spec, two roles (`ROLE_USER` / `ROLE_ADMIN`), access enforced at both the `SecurityFilterChain` level and via `@PreAuthorize` on controllers. No JWT. Authentication mechanism is defined by the feature spec.
 - **Flyway owns the schema** — `spring.jpa.hibernate.ddl-auto` is set to `validate` in every environment. Schema changes MUST be delivered as versioned Flyway migration scripts.
 - **Swagger UI disabled in `prod`** — enabled only in `dev` and `pre`.
 
@@ -292,7 +292,6 @@ logging:
 | `DB_URL`      | Database connection URL    | `jdbc:postgresql://host:5432/db` |
 | `DB_USER`     | Database username          | `app_user`                       |
 | `DB_PASSWORD` | Database password          | `*****`                          |
-| `JWT_SECRET`  | Secret key for JWT signing | `your-256-bit-secret`            |
 | `APP_PORT`    | Application port           | `8080`                           |
 
 ---
@@ -566,61 +565,43 @@ springdoc:
 
 ## 8. Security
 
-Authentication is based on **JWT (Bearer Token)** managed by Spring Security. Every request to a protected endpoint MUST carry a valid `Authorization: Bearer <token>` header. Role-based access control (RBAC) is enforced at the HTTP security filter chain level and optionally reinforced with method-level annotations.
+Authentication is managed by **Spring Security** using username/password credentials. Role-based access control (RBAC) is enforced at the `SecurityFilterChain` level and reinforced with `@PreAuthorize` annotations on controllers. No JWT, no token-based auth, no stateless sessions — the authentication mechanism is defined per feature spec.
 
 ### Authentication Strategy
 
-- JWT signed with **HS256** using a secret loaded from `${JWT_SECRET}`
-- Access token expiry: **15 minutes**
-- Refresh token expiry: **7 days**
+- Username/password authentication via `DaoAuthenticationProvider`
 - Passwords stored with **BCrypt** (strength = 12)
+- Session management: defined per deployment environment (stateful by default in `dev`; configure per spec for `pre` and `prod`)
 
 ### Roles
 
-| Role         | Spring authority | Description                              |
-|--------------|-----------------|------------------------------------------|
-| `ROLE_USER`  | `ROLE_USER`     | Authenticated end-user — read own data   |
-| `ROLE_ADMIN` | `ROLE_ADMIN`    | Administrator — full CRUD on all resources |
+| Role         | Spring authority | Description                                |
+|--------------|-----------------|---------------------------------------------|
+| `ROLE_USER`  | `ROLE_USER`     | Authenticated end-user — read own data      |
+| `ROLE_ADMIN` | `ROLE_ADMIN`    | Administrator — full CRUD on all resources  |
 
 ### Endpoint Access Matrix
 
-| Method | Path                        | `ROLE_USER` | `ROLE_ADMIN` | Public |
-|--------|-----------------------------|:-----------:|:------------:|:------:|
-| POST   | `/api/v1/auth/login`        |             |              | ✓      |
-| POST   | `/api/v1/auth/register`     |             |              | ✓      |
-| POST   | `/api/v1/auth/refresh`      |             |              | ✓      |
-| GET    | `/actuator/health`          |             |              | ✓      |
-| GET    | `/api/v1/users/me`          | ✓           | ✓            |        |
-| GET    | `/api/v1/users/{id}`        |             | ✓            |        |
-| GET    | `/api/v1/users`             |             | ✓            |        |
-| POST   | `/api/v1/users`             |             | ✓            |        |
-| PUT    | `/api/v1/users/{id}`        |             | ✓            |        |
-| DELETE | `/api/v1/users/{id}`        |             | ✓            |        |
+| Method | Path                    | `ROLE_USER` | `ROLE_ADMIN` | Public |
+|--------|-------------------------|:-----------:|:------------:|:------:|
+| GET    | `/actuator/health`      |             |              | ✓      |
+| GET    | `/swagger-ui/**`        |             |              | ✓ (dev/pre only) |
+| GET    | `/api/v1/users/me`      | ✓           | ✓            |        |
+| GET    | `/api/v1/users/{id}`    |             | ✓            |        |
+| GET    | `/api/v1/users`         |             | ✓            |        |
+| POST   | `/api/v1/users`         |             | ✓            |        |
+| PUT    | `/api/v1/users/{id}`    |             | ✓            |        |
+| DELETE | `/api/v1/users/{id}`    |             | ✓            |        |
+
+> Auth endpoints (login, register, etc.) are defined per feature spec and added to the public matchers at that time.
 
 ### Dependencies
 
 ```xml
-<!-- Spring Security + JWT (jjwt) -->
+<!-- Spring Security -->
 <dependency>
   <groupId>org.springframework.boot</groupId>
   <artifactId>spring-boot-starter-security</artifactId>
-</dependency>
-<dependency>
-  <groupId>io.jsonwebtoken</groupId>
-  <artifactId>jjwt-api</artifactId>
-  <version>0.12.6</version>
-</dependency>
-<dependency>
-  <groupId>io.jsonwebtoken</groupId>
-  <artifactId>jjwt-impl</artifactId>
-  <version>0.12.6</version>
-  <scope>runtime</scope>
-</dependency>
-<dependency>
-  <groupId>io.jsonwebtoken</groupId>
-  <artifactId>jjwt-jackson</artifactId>
-  <version>0.12.6</version>
-  <scope>runtime</scope>
 </dependency>
 
 <!-- Test support -->
@@ -629,105 +610,6 @@ Authentication is based on **JWT (Bearer Token)** managed by Spring Security. Ev
   <artifactId>spring-security-test</artifactId>
   <scope>test</scope>
 </dependency>
-```
-
-### JWT Service
-
-```java
-@Service
-public class JwtService {
-
-    @Value("${jwt.secret}")
-    private String secret;
-
-    @Value("${jwt.expiration.access:900000}")    // 15 min in ms
-    private long accessExpiration;
-
-    @Value("${jwt.expiration.refresh:604800000}") // 7 days in ms
-    private long refreshExpiration;
-
-    private SecretKey key() {
-        return Keys.hmacShaKeyFor(Decoders.BASE64.decode(secret));
-    }
-
-    public String generateAccessToken(UserDetails user) {
-        return buildToken(user, accessExpiration);
-    }
-
-    public String generateRefreshToken(UserDetails user) {
-        return buildToken(user, refreshExpiration);
-    }
-
-    private String buildToken(UserDetails user, long expiration) {
-        return Jwts.builder()
-            .subject(user.getUsername())
-            .claim("roles", user.getAuthorities().stream()
-                .map(GrantedAuthority::getAuthority).toList())
-            .issuedAt(new Date())
-            .expiration(new Date(System.currentTimeMillis() + expiration))
-            .signWith(key())
-            .compact();
-    }
-
-    public String extractUsername(String token) {
-        return extractClaim(token, Claims::getSubject);
-    }
-
-    public boolean isTokenValid(String token, UserDetails userDetails) {
-        return extractUsername(token).equals(userDetails.getUsername())
-            && !isTokenExpired(token);
-    }
-
-    private boolean isTokenExpired(String token) {
-        return extractClaim(token, Claims::getExpiration).before(new Date());
-    }
-
-    private <T> T extractClaim(String token, Function<Claims, T> resolver) {
-        Claims claims = Jwts.parser().verifyWith(key()).build()
-            .parseSignedClaims(token).getPayload();
-        return resolver.apply(claims);
-    }
-}
-```
-
-### JWT Authentication Filter
-
-```java
-@Component
-@RequiredArgsConstructor
-public class JwtAuthenticationFilter extends OncePerRequestFilter {
-
-    private final JwtService jwtService;
-    private final UserDetailsService userDetailsService;
-
-    @Override
-    protected void doFilterInternal(HttpServletRequest request,
-                                    HttpServletResponse response,
-                                    FilterChain filterChain)
-            throws ServletException, IOException {
-
-        String authHeader = request.getHeader("Authorization");
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-            filterChain.doFilter(request, response);
-            return;
-        }
-
-        String token = authHeader.substring(7);
-        String username = jwtService.extractUsername(token);
-
-        if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
-            UserDetails userDetails = userDetailsService.loadUserByUsername(username);
-            if (jwtService.isTokenValid(token, userDetails)) {
-                UsernamePasswordAuthenticationToken auth =
-                    new UsernamePasswordAuthenticationToken(
-                        userDetails, null, userDetails.getAuthorities());
-                auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                SecurityContextHolder.getContext().setAuthentication(auth);
-            }
-        }
-        filterChain.doFilter(request, response);
-    }
-}
 ```
 
 ### Security Configuration
@@ -739,34 +621,30 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 @RequiredArgsConstructor
 public class SecurityConfig {
 
-    private final JwtAuthenticationFilter jwtAuthFilter;
     private final AuthenticationProvider authenticationProvider;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         return http
             .csrf(AbstractHttpConfigurer::disable)
-            .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                // ── Public endpoints ─────────────────────────────────────────
+                // ── Public endpoints ────────────────────────────────────────
                 .requestMatchers(
-                    "/api/v1/auth/**",
                     "/actuator/health",
                     "/swagger-ui/**",
                     "/api-docs/**"
                 ).permitAll()
 
-                // ── USER: own profile only ───────────────────────────────────
+                // ── USER: own profile only ──────────────────────────────────
                 .requestMatchers(HttpMethod.GET, "/api/v1/users/me").hasAnyRole("USER", "ADMIN")
 
-                // ── ADMIN: full user management ──────────────────────────────
+                // ── ADMIN: full user management ─────────────────────────────
                 .requestMatchers("/api/v1/users/**").hasRole("ADMIN")
 
                 // ── Everything else requires authentication ──────────────────
                 .anyRequest().authenticated()
             )
             .authenticationProvider(authenticationProvider)
-            .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
             .exceptionHandling(ex -> ex
                 .authenticationEntryPoint((req, res, e) ->
                     res.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized"))
@@ -879,49 +757,10 @@ public class UserController {
 }
 ```
 
-### Auth Controller
-
-```java
-@RestController
-@RequestMapping("/api/v1/auth")
-@RequiredArgsConstructor
-@Tag(name = "Authentication")
-public class AuthController {
-
-    private final AuthenticationManager authenticationManager;
-    private final UserDetailsService userDetailsService;
-    private final JwtService jwtService;
-
-    @PostMapping("/login")
-    public ResponseEntity<AuthResponse> login(@RequestBody @Valid LoginRequest request) {
-        authenticationManager.authenticate(
-            new UsernamePasswordAuthenticationToken(request.email(), request.password()));
-        UserDetails user = userDetailsService.loadUserByUsername(request.email());
-        return ResponseEntity.ok(new AuthResponse(
-            jwtService.generateAccessToken(user),
-            jwtService.generateRefreshToken(user)
-        ));
-    }
-
-    @PostMapping("/refresh")
-    public ResponseEntity<AuthResponse> refresh(@RequestBody @Valid RefreshRequest request) {
-        String username = jwtService.extractUsername(request.refreshToken());
-        UserDetails user = userDetailsService.loadUserByUsername(username);
-        if (!jwtService.isTokenValid(request.refreshToken(), user)) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
-        }
-        return ResponseEntity.ok(new AuthResponse(
-            jwtService.generateAccessToken(user),
-            request.refreshToken()
-        ));
-    }
-}
-```
-
 ### Security Test Helpers
 
 ```java
-// Unit test — mock authenticated user
+// Unit test — mock authenticated user with @WithMockUser
 @WebMvcTest(UserController.class)
 class UserControllerTest {
 
@@ -950,7 +789,7 @@ class UserControllerTest {
     }
 }
 
-// Integration test — full JWT flow with Testcontainers
+// Integration test — full login flow with Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
 @Import(PostgresTestContainer.class)
@@ -960,52 +799,25 @@ class AuthIntegrationTest {
     @Autowired ObjectMapper objectMapper;
 
     @Test
-    void loginReturnsJwtToken() throws Exception {
-        LoginRequest login = new LoginRequest("admin@example.com", "Str0ng!Pass");
-
-        String body = mockMvc.perform(post("/api/v1/auth/login")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(objectMapper.writeValueAsString(login)))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.accessToken").isNotEmpty())
-            .andReturn().getResponse().getContentAsString();
-
-        String token = objectMapper.readTree(body).get("accessToken").asText();
-
-        // Use the token to call a protected endpoint
-        mockMvc.perform(get("/api/v1/users")
-                .header("Authorization", "Bearer " + token))
+    @WithMockUser(username = "admin@example.com", roles = "ADMIN")
+    void adminCanAccessUserList() throws Exception {
+        mockMvc.perform(get("/api/v1/users"))
             .andExpect(status().isOk());
     }
 
     @Test
+    @WithMockUser(username = "user@example.com", roles = "USER")
     void userRoleCannotAccessAdminEndpoints() throws Exception {
-        String token = loginAndGetToken("user@example.com", "Str0ng!Pass");
-
-        mockMvc.perform(get("/api/v1/users")
-                .header("Authorization", "Bearer " + token))
+        mockMvc.perform(get("/api/v1/users"))
             .andExpect(status().isForbidden());
     }
 
-    private String loginAndGetToken(String email, String password) throws Exception {
-        LoginRequest req = new LoginRequest(email, password);
-        String body = mockMvc.perform(post("/api/v1/auth/login")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(objectMapper.writeValueAsString(req)))
-            .andReturn().getResponse().getContentAsString();
-        return objectMapper.readTree(body).get("accessToken").asText();
+    @Test
+    void unauthenticatedCannotAccessProtectedEndpoints() throws Exception {
+        mockMvc.perform(get("/api/v1/users"))
+            .andExpect(status().isUnauthorized());
     }
 }
-```
-
-### `application.yml` — JWT configuration
-
-```yaml
-jwt:
-  secret: ${JWT_SECRET}
-  expiration:
-    access: 900000      # 15 minutes
-    refresh: 604800000  # 7 days
 ```
 
 ---
@@ -1473,4 +1285,4 @@ Before approving a Pull Request, verify:
 
 *This document is a living standard — any changes must be team-approved, versioned, and recorded with a new `Last Amended` date.*
 
-**Version**: 1.3.0 | **Ratified**: 2026-05-21 | **Last Amended**: 2026-05-23
+**Version**: 2.0.0 | **Ratified**: 2026-05-21 | **Last Amended**: 2026-05-23
